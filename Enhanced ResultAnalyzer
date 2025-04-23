@@ -1,0 +1,665 @@
+"""
+Enhanced ResultAnalyzer class with actual implementation for analyzing docking results.
+"""
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.spatial import distance
+from Bio.PDB import PDBParser, Selection
+import math
+from rdkit import Chem
+from rdkit.Chem import AllChem, Draw
+from sklearn.cluster import AgglomerativeClustering
+
+class ResultAnalyzer:
+    """Analyzes and visualizes docking results."""
+    
+    def __init__(self, docking_results, protein_file, ligand_file):
+        """
+        Initialize with docking results and input files.
+        
+        Args:
+            docking_results: List of dictionaries with docking scores and poses
+            protein_file: Path to protein structure file
+            ligand_file: Path to ligand file
+        """
+        self.results = docking_results
+        self.protein_file = protein_file
+        self.ligand_file = ligand_file
+        self.protein_structure = None
+        self.interaction_data = {}
+        
+        # Load protein structure
+        try:
+            parser = PDBParser(QUIET=True)
+            self.protein_structure = parser.get_structure('protein', protein_file)
+        except Exception as e:
+            print(f"Error loading protein structure: {e}")
+            
+    def _get_pose_atoms(self, pose_file):
+        """
+        Extract atom coordinates from a pose file.
+        
+        Args:
+            pose_file: Path to pose PDB file
+            
+        Returns:
+            Dictionary with atom info
+        """
+        atoms = []
+        
+        try:
+            parser = PDBParser(QUIET=True)
+            pose_structure = parser.get_structure('pose', pose_file)
+            
+            for model in pose_structure:
+                for chain in model:
+                    for residue in chain:
+                        for atom in residue:
+                            atom_info = {
+                                'id': atom.get_id(),
+                                'element': atom.element,
+                                'coord': atom.coord,
+                                'residue': residue.get_resname()
+                            }
+                            atoms.append(atom_info)
+        except Exception as e:
+            print(f"Error reading pose file: {e}")
+            
+        return atoms
+        
+    def _get_protein_atoms(self):
+        """
+        Extract atom coordinates from the protein structure.
+        
+        Returns:
+            Dictionary with atom info
+        """
+        if not self.protein_structure:
+            print("Protein structure not loaded.")
+            return []
+            
+        atoms = []
+        
+        try:
+            for model in self.protein_structure:
+                for chain in model:
+                    for residue in chain:
+                        if residue.id[0] == " ":  # Standard residue
+                            for atom in residue:
+                                atom_info = {
+                                    'id': atom.get_id(),
+                                    'element': atom.element,
+                                    'coord': atom.coord,
+                                    'residue': residue.get_resname(),
+                                    'residue_id': residue.id[1],
+                                    'chain_id': chain.id
+                                }
+                                atoms.append(atom_info)
+        except Exception as e:
+            print(f"Error reading protein structure: {e}")
+            
+        return atoms
+        
+    def calculate_interactions(self, pose_file):
+        """
+        Calculate protein-ligand interactions for a given pose.
+        
+        Args:
+            pose_file: Path to pose PDB file
+            
+        Returns:
+            Dictionary with interaction data
+        """
+        if not os.path.exists(pose_file):
+            print(f"Pose file not found: {pose_file}")
+            return {}
+            
+        print(f"Calculating interactions for pose {pose_file}")
+        
+        # Get pose and protein atoms
+        pose_atoms = self._get_pose_atoms(pose_file)
+        protein_atoms = self._get_protein_atoms()
+        
+        if not pose_atoms or not protein_atoms:
+            print("Could not analyze interactions due to missing atom data.")
+            return {}
+            
+        # Define interaction parameters
+        h_bond_dist = 3.5  # Hydrogen bond distance cutoff (Å)
+        hydrophobic_dist = 4.0  # Hydrophobic interaction distance cutoff (Å)
+        ionic_dist = 4.0  # Ionic interaction distance cutoff (Å)
+        pi_stack_dist = 5.5  # π-stacking distance cutoff (Å)
+        
+        # Define atom types
+        h_bond_acceptors = ['O', 'N']
+        h_bond_donors = ['N', 'O']  # When hydrogen attached
+        hydrophobic_atoms = ['C']
+        positively_charged = ['N']  # Simplified, should check residue type
+        negatively_charged = ['O']  # Simplified, should check residue type
+        aromatic_atoms = ['C']  # Simplified, should check if in aromatic ring
+        
+        # Calculate interactions
+        h_bonds = []
+        hydrophobic = []
+        ionic = []
+        pi_stacking = []
+        
+        # Find close contacts
+        for p_atom in protein_atoms:
+            p_coord = p_atom['coord']
+            
+            for l_atom in pose_atoms:
+                l_coord = l_atom['coord']
+                
+                # Calculate distance
+                dist = np.linalg.norm(p_coord - l_coord)
+                
+                # Check for hydrogen bonds
+                if (dist <= h_bond_dist and 
+                    ((p_atom['element'] in h_bond_acceptors and l_atom['element'] in h_bond_donors) or
+                     (p_atom['element'] in h_bond_donors and l_atom['element'] in h_bond_acceptors))):
+                    h_bonds.append({
+                        'protein_atom': p_atom,
+                        'ligand_atom': l_atom,
+                        'distance': dist
+                    })
+                
+                # Check for hydrophobic interactions
+                if (dist <= hydrophobic_dist and 
+                    p_atom['element'] in hydrophobic_atoms and 
+                    l_atom['element'] in hydrophobic_atoms):
+                    hydrophobic.append({
+                        'protein_atom': p_atom,
+                        'ligand_atom': l_atom,
+                        'distance': dist
+                    })
+                
+                # Check for ionic interactions
+                if (dist <= ionic_dist and 
+                    ((p_atom['element'] in positively_charged and l_atom['element'] in negatively_charged) or
+                     (p_atom['element'] in negatively_charged and l_atom['element'] in positively_charged))):
+                    ionic.append({
+                        'protein_atom': p_atom,
+                        'ligand_atom': l_atom,
+                        'distance': dist
+                    })
+                
+                # Check for pi-stacking
+                if (dist <= pi_stack_dist and 
+                    p_atom['element'] in aromatic_atoms and 
+                    l_atom['element'] in aromatic_atoms):
+                    pi_stacking.append({
+                        'protein_atom': p_atom,
+                        'ligand_atom': l_atom,
+                        'distance': dist
+                    })
+        
+        # Analyze binding site residues
+        binding_site_residues = set()
+        binding_distance = 4.5  # Distance cutoff for binding site residues
+        
+        for p_atom in protein_atoms:
+            p_coord = p_atom['coord']
+            
+            for l_atom in pose_atoms:
+                l_coord = l_atom['coord']
+                
+                dist = np.linalg.norm(p_coord - l_coord)
+                
+                if dist <= binding_distance:
+                    binding_site_residues.add((
+                        p_atom['chain_id'],
+                        p_atom['residue_id'],
+                        p_atom['residue']
+                    ))
+        
+        # Compile interaction data
+        interactions = {
+            'h_bonds': h_bonds,
+            'hydrophobic': hydrophobic,
+            'ionic': ionic,
+            'pi_stacking': pi_stacking,
+            'binding_site_residues': sorted(list(binding_site_residues)),
+            'total_interactions': len(h_bonds) + len(hydrophobic) + len(ionic) + len(pi_stacking)
+        }
+        
+        # Cache the results
+        pose_name = os.path.basename(pose_file)
+        self.interaction_data[pose_name] = interactions
+        
+        return interactions
+    
+    def cluster_poses(self, pose_dir, rmsd_cutoff=2.0):
+        """
+        Cluster docking poses based on RMSD.
+        
+        Args:
+            pose_dir: Directory containing pose PDB files
+            rmsd_cutoff: RMSD cutoff for clustering (Å)
+            
+        Returns:
+            Dictionary with cluster information
+        """
+        pose_files = []
+        for i in range(len(self.results)):
+            pose_file = os.path.join(pose_dir, f"pose_{i+1}.pdb")
+            if os.path.exists(pose_file):
+                pose_files.append(pose_file)
+        
+        if len(pose_files) < 2:
+            print("Need at least 2 poses for clustering.")
+            return {"clusters": [{"poses": [0], "representative": 0}]}
+        
+        try:
+            # Calculate RMSD matrix
+            n_poses = len(pose_files)
+            rmsd_matrix = np.zeros((n_poses, n_poses))
+            
+            for i in range(n_poses):
+                atoms_i = self._get_pose_atoms(pose_files[i])
+                coords_i = np.array([atom['coord'] for atom in atoms_i])
+                
+                for j in range(i+1, n_poses):
+                    atoms_j = self._get_pose_atoms(pose_files[j])
+                    coords_j = np.array([atom['coord'] for atom in atoms_j])
+                    
+                    # Simple RMSD calculation (assumes same atom order)
+                    # In a real implementation, you would use a proper RMSD calculation
+                    # that accounts for atom matching
+                    if len(coords_i) == len(coords_j):
+                        rmsd = np.sqrt(np.mean(np.sum((coords_i - coords_j)**2, axis=1)))
+                    else:
+                        rmsd = 999.0  # Different number of atoms
+                        
+                    rmsd_matrix[i, j] = rmsd
+                    rmsd_matrix[j, i] = rmsd
+            
+            # Perform hierarchical clustering
+            clustering = AgglomerativeClustering(
+                n_clusters=None,
+                distance_threshold=rmsd_cutoff,
+                affinity='precomputed',
+                linkage='average'
+            )
+            
+            cluster_labels = clustering.fit_predict(rmsd_matrix)
+            n_clusters = len(set(cluster_labels))
+            
+            # Organize poses by cluster
+            clusters = []
+            for cluster_id in range(n_clusters):
+                cluster_poses = np.where(cluster_labels == cluster_id)[0].tolist()
+                
+                # Find representative (pose with best score)
+                scores = [self.results[i]['score'] for i in cluster_poses]
+                representative = cluster_poses[np.argmin(scores)]
+                
+                clusters.append({
+                    'poses': cluster_poses,
+                    'representative': representative,
+                    'score': self.results[representative]['score']
+                })
+                
+            # Sort clusters by score of representative
+            clusters.sort(key=lambda x: x['score'])
+            
+            return {
+                'rmsd_matrix': rmsd_matrix.tolist(),
+                'cluster_labels': cluster_labels.tolist(),
+                'clusters': clusters
+            }
+            
+        except Exception as e:
+            print(f"Error clustering poses: {e}")
+            return {"clusters": [{"poses": list(range(len(pose_files))), "representative": 0}]}
+    
+    def visualize_pose(self, pose_idx=0, output_file=None):
+        """
+        Visualize a specific docking pose.
+        
+        Args:
+            pose_idx: Index of the pose to visualize
+            output_file: Path to save the visualization
+            
+        Returns:
+            Matplotlib figure or path to saved figure
+        """
+        if not self.results or pose_idx >= len(self.results):
+            print("Invalid pose index.")
+            return None
+            
+        # Find the pose file
+        pose_file = self.results[pose_idx].get('pose_file')
+        if not pose_file or not os.path.exists(pose_file):
+            print(f"Pose file not found for pose {pose_idx+1}")
+            return None
+            
+        # Get interaction data
+        pose_name = os.path.basename(pose_file)
+        if pose_name in self.interaction_data:
+            interactions = self.interaction_data[pose_name]
+        else:
+            interactions = self.calculate_interactions(pose_file)
+            
+        # Extract data for visualization
+        pose_atoms = self._get_pose_atoms(pose_file)
+        
+        if not pose_atoms:
+            print("No atom data found for pose.")
+            return None
+            
+        # Set up 3D plot
+        fig = plt.figure(figsize=(12, 10))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # Plot ligand
+        ligand_coords = np.array([atom['coord'] for atom in pose_atoms])
+        ax.scatter(
+            ligand_coords[:, 0],
+            ligand_coords[:, 1],
+            ligand_coords[:, 2],
+            color='green',
+            s=30,
+            alpha=0.7,
+            label='Ligand'
+        )
+        
+        # Plot binding site residues
+        if 'binding_site_residues' in interactions:
+            binding_site_atoms = []
+            for chain_id, res_id, res_name in interactions['binding_site_residues']:
+                for atom in self._get_protein_atoms():
+                    if (atom['chain_id'] == chain_id and 
+                        atom['residue_id'] == res_id and 
+                        atom['residue'] == res_name):
+                        binding_site_atoms.append(atom)
+                        
+            if binding_site_atoms:
+                bs_coords = np.array([atom['coord'] for atom in binding_site_atoms])
+                ax.scatter(
+                    bs_coords[:, 0],
+                    bs_coords[:, 1],
+                    bs_coords[:, 2],
+                    color='lightblue',
+                    s=15,
+                    alpha=0.5,
+                    label='Binding Site'
+                )
+        
+        # Plot hydrogen bonds
+        if interactions.get('h_bonds'):
+            for hb in interactions['h_bonds']:
+                p_coord = hb['protein_atom']['coord']
+                l_coord = hb['ligand_atom']['coord']
+                ax.plot(
+                    [p_coord[0], l_coord[0]],
+                    [p_coord[1], l_coord[1]],
+                    [p_coord[2], l_coord[2]],
+                    color='red',
+                    linestyle='--',
+                    linewidth=1,
+                    alpha=0.7
+                )
+        
+        # Set plot parameters
+        ax.set_xlabel('X (Å)')
+        ax.set_ylabel('Y (Å)')
+        ax.set_zlabel('Z (Å)')
+        ax.set_title(f'Docking Pose {pose_idx+1}: Score = {self.results[pose_idx]["score"]:.2f} kcal/mol')
+        
+        # Add legend
+        ax.legend()
+        
+        # Set viewpoint
+        centroid = np.mean(ligand_coords, axis=0)
+        ax.view_init(elev=30, azim=45)
+        
+        # Save or show
+        if output_file:
+            plt.savefig(output_file, dpi=300, bbox_inches='tight')
+            plt.close()
+            return output_file
+        else:
+            return fig
+    
+    def generate_interaction_diagram(self, pose_idx=0, output_file=None):
+        """
+        Generate a 2D interaction diagram for a specific pose.
+        
+        Args:
+            pose_idx: Index of the pose to visualize
+            output_file: Path to save the diagram
+            
+        Returns:
+            Path to saved diagram
+        """
+        if pose_idx >= len(self.results):
+            print("Invalid pose index.")
+            return None
+            
+        # Get the pose file
+        pose_file = self.results[pose_idx].get('pose_file')
+        if not pose_file or not os.path.exists(pose_file):
+            print(f"Pose file not found for pose {pose_idx+1}")
+            return None
+            
+        # Get or calculate interaction data
+        pose_name = os.path.basename(pose_file)
+        if pose_name in self.interaction_data:
+            interactions = self.interaction_data[pose_name]
+        else:
+            interactions = self.calculate_interactions(pose_file)
+            
+        try:
+            # Create a figure
+            fig, ax = plt.subplots(figsize=(10, 8))
+            
+            # Draw the ligand in the center
+            ax.scatter(0, 0, s=300, color='green', alpha=0.7)
+            ax.text(0, 0, "Ligand", ha='center', va='center', fontweight='bold')
+            
+            # Draw binding site residues around in a circle
+            if 'binding_site_residues' in interactions:
+                n_residues = len(interactions['binding_site_residues'])
+                if n_residues > 0:
+                    radius = 5
+                    for i, (chain_id, res_id, res_name) in enumerate(interactions['binding_site_residues']):
+                        angle = 2 * math.pi * i / n_residues
+                        x = radius * math.cos(angle)
+                        y = radius * math.sin(angle)
+                        
+                        # Determine residue type for coloring
+                        color = 'gray'
+                        if res_name in ['ASP', 'GLU']:
+                            color = 'red'  # Negatively charged
+                        elif res_name in ['LYS', 'ARG', 'HIS']:
+                            color = 'blue'  # Positively charged
+                        elif res_name in ['SER', 'THR', 'ASN', 'GLN', 'TYR']:
+                            color = 'purple'  # Polar
+                        elif res_name in ['PHE', 'TRP', 'TYR']:
+                            color = 'orange'  # Aromatic
+                        elif res_name in ['ALA', 'VAL', 'LEU', 'ILE', 'MET', 'PRO']:
+                            color = 'green'  # Hydrophobic
+                            
+                        # Draw residue
+                        ax.scatter(x, y, s=200, color=color, alpha=0.7)
+                        ax.text(x, y, f"{res_name}\n{chain_id}:{res_id}", ha='center', va='center')
+                        
+                        # Draw interactions
+                        has_interaction = False
+                        
+                        # Check for hydrogen bonds
+                        for hb in interactions.get('h_bonds', []):
+                            p_atom = hb['protein_atom']
+                            if (p_atom['chain_id'] == chain_id and 
+                                p_atom['residue_id'] == res_id and 
+                                p_atom['residue'] == res_name):
+                                ax.plot([0, x], [0, y], 'r--', alpha=0.7, linewidth=2)
+                                has_interaction = True
+                                break
+                                
+                        # Check for hydrophobic interactions if no H-bond
+                        if not has_interaction:
+                            for hp in interactions.get('hydrophobic', []):
+                                p_atom = hp['protein_atom']
+                                if (p_atom['chain_id'] == chain_id and 
+                                    p_atom['residue_id'] == res_id and 
+                                    p_atom['residue'] == res_name):
+                                    ax.plot([0, x], [0, y], 'g-', alpha=0.7, linewidth=2)
+                                    has_interaction = True
+                                    break
+                                    
+                        # Check for ionic interactions if no other interaction
+                        if not has_interaction:
+                            for ion in interactions.get('ionic', []):
+                                p_atom = ion['protein_atom']
+                                if (p_atom['chain_id'] == chain_id and 
+                                    p_atom['residue_id'] == res_id and 
+                                    p_atom['residue'] == res_name):
+                                    ax.plot([0, x], [0, y], 'b:', alpha=0.7, linewidth=2)
+                                    has_interaction = True
+                                    break
+                                    
+                        # Check for pi-stacking if no other interaction
+                        if not has_interaction:
+                            for pi in interactions.get('pi_stacking', []):
+                                p_atom = pi['protein_atom']
+                                if (p_atom['chain_id'] == chain_id and 
+                                    p_atom['residue_id'] == res_id and 
+                                    p_atom['residue'] == res_name):
+                                    ax.plot([0, x], [0, y], 'y-.', alpha=0.7, linewidth=2)
+                                    break
+            
+            # Add legend
+            ax.plot([], [], 'r--', label='Hydrogen Bond')
+            ax.plot([], [], 'g-', label='Hydrophobic')
+            ax.plot([], [], 'b:', label='Ionic')
+            ax.plot([], [], 'y-.', label='π-stacking')
+            
+            # Add title
+            ax.set_title(f'Interaction Diagram for Pose {pose_idx+1}: Score = {self.results[pose_idx]["score"]:.2f} kcal/mol')
+            
+            # Set axis limits and remove ticks
+            ax.set_xlim(-7, 7)
+            ax.set_ylim(-7, 7)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            
+            # Add legend
+            ax.legend(loc='upper right', bbox_to_anchor=(1.1, 1.1))
+            
+            # Save or show
+            if output_file:
+                plt.savefig(output_file, dpi=300, bbox_inches='tight')
+                plt.close()
+                return output_file
+            else:
+                return fig
+        except Exception as e:
+            print(f"Error generating interaction diagram: {e}")
+            return None
+    
+    def generate_report(self, output_file, include_clusters=True, include_interactions=True):
+        """
+        Generate a comprehensive docking report.
+        
+        Args:
+            output_file: Path to save the report
+            include_clusters: Whether to include pose clustering
+            include_interactions: Whether to include interaction analysis
+            
+        Returns:
+            Path to saved report
+        """
+        if not self.results:
+            print("No results for report generation")
+            return None
+            
+        print(f"Generating docking report to {output_file}")
+        
+        try:
+            with open(output_file, 'w') as f:
+                f.write("DOCKING RESULTS REPORT\n")
+                f.write("======================\n\n")
+                f.write(f"Date: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                
+                # Input files
+                f.write("INPUT FILES\n")
+                f.write("-----------\n")
+                f.write(f"Protein: {self.protein_file}\n")
+                f.write(f"Ligand: {self.ligand_file}\n\n")
+                
+                # Summary of results
+                f.write("DOCKING RESULTS SUMMARY\n")
+                f.write("----------------------\n")
+                f.write(f"Number of poses generated: {len(self.results)}\n")
+                
+                if self.results:
+                    best_score = min([r['score'] for r in self.results])
+                    worst_score = max([r['score'] for r in self.results])
+                    avg_score = sum([r['score'] for r in self.results]) / len(self.results)
+                    
+                    f.write(f"Best binding energy: {best_score:.2f} kcal/mol\n")
+                    f.write(f"Worst binding energy: {worst_score:.2f} kcal/mol\n")
+                    f.write(f"Average binding energy: {avg_score:.2f} kcal/mol\n\n")
+                
+                # Detailed pose information
+                f.write("POSE DETAILS\n")
+                f.write("------------\n")
+                for i, result in enumerate(self.results):
+                    f.write(f"Pose {i+1}:\n")
+                    f.write(f"  - Binding Energy: {result['score']:.2f} kcal/mol\n")
+                    f.write(f"  - RMSD from best mode (lower bound): {result.get('rmsd_lb', 'N/A')}\n")
+                    f.write(f"  - RMSD from best mode (upper bound): {result.get('rmsd_ub', 'N/A')}\n")
+                    
+                    # Add interaction details if available
+                    if include_interactions and 'pose_file' in result:
+                        pose_name = os.path.basename(result['pose_file'])
+                        if pose_name in self.interaction_data:
+                            interactions = self.interaction_data[pose_name]
+                        else:
+                            interactions = self.calculate_interactions(result['pose_file'])
+                            
+                        if interactions:
+                            f.write("  - Interactions:\n")
+                            f.write(f"    - Hydrogen bonds: {len(interactions.get('h_bonds', []))}\n")
+                            f.write(f"    - Hydrophobic interactions: {len(interactions.get('hydrophobic', []))}\n")
+                            f.write(f"    - Ionic interactions: {len(interactions.get('ionic', []))}\n")
+                            f.write(f"    - π-stacking interactions: {len(interactions.get('pi_stacking', []))}\n")
+                            
+                            # List binding site residues
+                            if 'binding_site_residues' in interactions:
+                                f.write("    - Binding site residues:\n")
+                                for chain_id, res_id, res_name in interactions['binding_site_residues']:
+                                    f.write(f"      {chain_id}:{res_name}-{res_id}\n")
+                    
+                    f.write("\n")
+                
+                # Clustering information
+                if include_clusters and len(self.results) > 1:
+                    pose_dir = os.path.dirname(self.results[0].get('pose_file', ''))
+                    if pose_dir and os.path.exists(pose_dir):
+                        clustering = self.cluster_poses(pose_dir)
+                        
+                        if 'clusters' in clustering:
+                            f.write("POSE CLUSTERING\n")
+                            f.write("--------------\n")
+                            f.write(f"Number of clusters: {len(clustering['clusters'])}\n\n")
+                            
+                            for i, cluster in enumerate(clustering['clusters']):
+                                f.write(f"Cluster {i+1}:\n")
+                                f.write(f"  - Representative pose: {cluster['representative']+1}\n")
+                                f.write(f"  - Score of representative: {cluster['score']:.2f} kcal/mol\n")
+                                f.write(f"  - Poses in cluster: {', '.join([str(p+1) for p in cluster['poses']])}\n")
+                                f.write(f"  - Number of poses: {len(cluster['poses'])}\n\n")
+                
+                f.write("\nEnd of report.\n")
+                
+            print(f"Successfully generated docking report: {output_file}")
+            return output_file
+        except Exception as e:
+            print(f"Error generating report: {e}")
+            return None
