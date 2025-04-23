@@ -1,0 +1,56 @@
+"""
+Configuration file for the Ligand-Based Pocket Finding and Docking Framework.
+"""
+
+config = {
+    # Paths
+    "paths": {
+        "output_dir": "./docking_output/",
+        "log_file": "./docking.log",
+    },
+    
+    # Protein preprocessing options
+    "protein_prep": {
+        "remove_waters": True,
+        "remove_ligands": True,
+        "add_hydrogens": True,
+        "optimize_h": True,
+        "ph": 7.4,  # pH for hydrogen addition
+    },
+    
+    # Pocket finding parameters
+    "pocket_finder": {
+        "method": "ligsite",  # Options: ligsite, fpocket, etc.
+        "probe_radius": 1.4,  # In Angstroms
+        "min_volume": 100,    # Minimum pocket volume in cubic Angstroms
+        "max_pockets": 5,     # Maximum number of pockets to consider
+    },
+    
+    # Ligand preparation options
+    "ligand_prep": {
+        "add_hydrogens": True,
+        "ph": 7.4,
+        "gen_tautomers": False,
+        "gen_conformers": True,
+        "num_conformers": 10,
+        "energy_minimization": True,
+    },
+    
+    # Docking parameters
+    "docking": {
+        "engine": "vina",     # Options: vina, smina, gnina, etc.
+        "exhaustiveness": 8,  # Search exhaustiveness
+        "num_modes": 9,       # Number of binding modes to generate
+        "energy_range": 3,    # Maximum energy difference between best and worst binding mode
+        "box_padding": 4.0,   # Additional box padding around pocket in Angstroms
+    },
+    
+    # Analysis options
+    "analysis": {
+        "calculate_interactions": True,
+        "visualization": True,
+        "generate_report": True,
+        "cluster_poses": True,
+        "cluster_rmsd": 2.0,   # RMSD threshold for clustering
+    }
+}
