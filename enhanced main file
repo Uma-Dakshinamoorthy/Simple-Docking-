@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""
+Advanced Ligand-Based Pocket Finding and Docking Framework - Main Script
+
+This script demonstrates the use of the enhanced implementation for:
+1. Grid-based pocket detection
+2. AutoDock Vina integration for docking
+3. Detailed interaction analysis
+"""
+
+import os
+import sys
+import argparse
+import logging
+from datetime import datetime
+import matplotlib.pyplot as plt
+
+# Import enhanced implementations 
+# (in a real project, these would be in separate modules)
+from pocket_finder_implementation import PocketFinder
+from docking_implementation import Docking
+from result_analyzer_implementation import ResultAnalyzer
+
+# Import configuration
+from config import config
+
+def setup_logging(log_file=None):
+    """Set up logging configuration."""
+    if log_file:
+        log_dir = os.path.dirname(log_file)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+            
+        logging.basicConfig(
+            filename=log_file,
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+    else:
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+    
+    # Add console handler
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
+    console.setFormatter(formatter)
+    logging.getLogger().addHandler(console)
+    
+    return logging.getLogger()
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Advanced Ligand-based pocket finding and docking')
+    
+    parser.add_argument('-p', '--protein', required=True,
+                      help='Protein structure file in PDB format')
+    parser.add_argument('-l', '--ligand', required=True,
+                      help='Ligand file in SDF, MOL, or MOL2 format')
+    parser.add_argument('-o', '--output', default='docking_results',
+                      help='Output directory for results (default: docking_results)')
+    parser.add_argument('--vina', default='vina',
+                      help='Path to AutoDock Vina executable (default: vina)')
+    parser.add_argument('--skip-pocket', action='store_true',
+                      help='Skip pocket finding, only do docking at center of structure')
+    parser.add_argument('--visualize', action='store_true',
+                      help='Generate visualizations of pockets and poses')
+    parser.add_argument('--detailed-analysis', action='store_true',
+                      help='Generate detailed interaction analysis')
+    
+    return parser.parse_args()
+
+def main():
+    """Run the enhanced docking workflow."""
+    # Parse arguments
+    args = parse_arguments()
+    
+    # Setup logging
+    log_file = os.path.join(args.output, "docking.log")
+    logger = setup_logging(log_file)
+    logger.info(f"Starting enhanced docking workflow at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Create output directory
+    output_dir = args.output
+    os.makedirs(output_dir, exist_ok=True)
+    logger.info(f"Results will be saved to {output_dir}")
+    
+    # Step 1: Find binding pockets
+    if not args.skip_pocket:
+        logger.info("Step 1: Finding binding pockets in protein structure")
+        
+        # Initialize PocketFinder with the protein structure
+        pocket_finder = PocketFinder(args.protein)
+        
+        # Calculate surface
+        logger.info("Calculating protein surface...")
+        surface = pocket_finder.calculate_surface(
+            probe_radius=config["pocket_finder"]["probe_radius"],
+            grid_spacing=1.0
+        )
+        
+        # Identify cavities
+        logger.info("Identifying potential binding pockets...")
+        pockets = pocket_finder.identify_cavities(
+            min_volume=config["pocket_finder"]["min_volume"]
+        )
+        
+        # Rank pockets
+        logger.info("Ranking identified pockets...")
+        ranked_pockets = pocket_finder.rank_pockets()
+        
+        if not ranked_pockets:
+            logger.error("No suitable binding pockets found!")
+            return
+            
+        logger.info(f"Found {len(ranked_pockets)} potential binding pockets")
+        
+        # Display pocket information
+        for i, pocket in enumerate(ranked_pockets[:config["pocket_finder"]["max_pockets"]]):
+            logger.info(f"Pocket {i+1}: Center = {pocket['center']}, "
+                       f"Volume = {pocket['volume']:.1f}Å³, Score = {pocket['score']:.3f}")
+        
+        # Visualize pockets if requested
+        if args.visualize:
+            logger.info("Generating pocket visualization...")
+            viz_file = os.path.join(output_dir, "binding_pockets.png")
+            fig, ax = pocket_finder.visualize_pockets()
+            plt.savefig(viz_file, dpi=300, bbox_inches='tight')
+            plt.close()
+            logger.info(f"Pocket visualization saved to {viz_file}")
+            
+            # Export pocket centers for PyMOL
+            centers_file = os.path.join(output_dir, "pocket_centers.pdb")
+            pocket_finder.export_pocket_centers(centers_file)
+            logger.info(f"Pocket centers exported to {centers_file}")
+    else:
+        logger.info("Skipping pocket finding as requested")
+        # Create dummy pocket at center of protein
+        from Bio.PDB import PDBParser
+        parser = PDBParser(QUIET=True)
+        structure = parser.get_structure('protein', args.protein)
+        
+        # Calculate center of structure
+        coords = []
+        for model in structure:
+            for chain in model:
+                for residue in chain:
+                    for atom in residue:
+                        coords.append(atom.coord)
+        
+        if coords:
+            import numpy as np
+            center = np.mean(coords, axis=0)
+            ranked_pockets = [{'center': tuple(center), 'volume': 500, 'score': 0.9}]
+            logger.info(f"Using center of protein as binding site: {tuple(center)}")
+        else:
+            logger.error("Could not calculate center of protein structure!")
+            return
+    
+    # Step 2: Prepare for docking
+    logger.info("Step 2: Preparing for molecular docking")
+    
+    # Use top-ranked pocket for docking
+    target_pocket = ranked_pockets[0]
+    logger.info(f"Using top-ranked pocket for docking (center: {target_pocket['center']})")
+    
+    # Initialize Docking
+    docking = Docking(args.protein, args.ligand, vina_executable=args.vina)
+    
+    # Step 3: Perform docking
+    logger.info("Step 3: Performing molecular docking")
+    
+    # Calculate box size based on pocket volume
+    volume = target_pocket['volume']
+    import numpy as np
+    box_edge = (volume * 3/4 / np.pi) ** (1/3) * 2  # Approximate radius to box edge
+    box_edge = max(box_edge, 15)  # Minimum box size
+    padding = config["docking"]["box_padding"]
+    box_size = (box_edge + padding*2, box_edge + padding*2, box_edge + padding*2)
+    
+    logger.info(f"Docking box: center={target_pocket['center']}, size={box_size}")
+    
+    try:
+        # Prepare receptor
+        logger.info("Preparing receptor for docking...")
+        receptor_pdbqt = docking.prepare_receptor(target_pocket['center'], box_size)
+        
+        # Prepare ligand
+        logger.info("Preparing ligand for docking...")
+        ligand_pdbqt = docking.prepare_ligand()
+        
+        # Perform docking
+        logger.info("Running docking calculations...")
+        results = docking.dock_to_pocket(
+            target_pocket,
+            exhaustiveness=config["docking"]["exhaustiveness"],
+            num_modes=config["docking"]["num_modes"],
+            energy_range=config["docking"]["energy_range"]
+        )
+        
+        logger.info(f"Generated {len(results)} docking poses")
+        for i, res in enumerate(results):
+            logger.info(f"Pose {i+1}: Score = {res['score']:.2f} kcal/mol")
+        
+        # Save docking poses
+        poses_dir = os.path.join(output_dir, "poses")
+        logger.info(f"Saving docking poses to {poses_dir}")
+        results_file = docking.save_poses(poses_dir)
+        
+        # Generate docking visualizations
+        if args.visualize:
+            logger.info("Generating docking visualizations...")
+            viz_files = docking.visualize_results(output_dir)
+            logger.info(f"Docking visualizations saved to {output_dir}")
+    
+    except Exception as e:
+        logger.error(f"Error during docking: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return
+    
+    # Step 4: Analyze results
+    if args.detailed_analysis:
+        logger.info("Step 4: Performing detailed analysis of docking results")
+        
+        analyzer = ResultAnalyzer(results, args.protein, args.ligand)
+        
+        # Calculate interactions for top poses
+        num_poses_to_analyze = min(3, len(results))
+        logger.info(f"Analyzing interactions for top {num_poses_to_analyze} poses...")
+        
+        for i in range(num_poses_to_analyze):
+            pose_file = os.path.join(poses_dir, f"pose_{i+1}.pdb")
+            if os.path.exists(pose_file):
+                logger.info(f"Analyzing pose {i+1}...")
+                interactions = analyzer.calculate_interactions(pose_file)
+                
+                logger.info(f"Interactions in pose {i+1}:")
+                logger.info(f"  - Hydrogen bonds: {len(interactions.get('h_bonds', []))}")
+                logger.info(f"  - Hydrophobic interactions: {len(interactions.get('hydrophobic', []))}")
+                logger.info(f"  - Ionic interactions: {len(interactions.get('ionic', []))}")
+                logger.info(f"  - π-stacking interactions: {len(interactions.get('pi_stacking', []))}")
+                logger.info(f"  - Binding site residues: {len(interactions.get('binding_site_residues', []))}")
+        
+        # Cluster poses
+        if len(results) > 1:
+            logger.info("Clustering similar docking poses...")
+            clustering = analyzer.cluster_poses(poses_dir, rmsd_cutoff=config["analysis"]["cluster_rmsd"])
+            
+            if 'clusters' in clustering:
+                logger.info(f"Docking poses grouped into {len(clustering['clusters'])} clusters")
+                
+                for i, cluster in enumerate(clustering['clusters']):
+                    logger.info(f"Cluster {i+1}: {len(cluster['poses'])} poses, "
+                               f"representative pose {cluster['representative']+1} "
+                               f"with score {cluster['score']:.2f} kcal/mol")
+        
+        # Generate visualizations
+        if args.visualize:
+            logger.info("Generating interaction visualizations...")
+            
+            # 3D visualization of top pose
+            pose_viz_file = os.path.join(output_dir, "top_pose_3d.png")
+            analyzer.visualize_pose(0, pose_viz_file)
+            logger.info(f"3D visualization of top pose saved to {pose_viz_file}")
+            
+            # 2D interaction diagram
+            diagram_file = os.path.join(output_dir, "interaction_diagram.png")
+            analyzer.generate_interaction_diagram(0, diagram_file)
+            logger.info(f"2D interaction diagram saved to {diagram_file}")
+        
+        # Generate comprehensive report
+        report_file = os.path.join(output_dir, "docking_report.txt")
+        logger.info(f"Generating comprehensive docking report at {report_file}")
+        analyzer.generate_report(report_file)
+    
+    logger.info(f"Docking workflow completed. All results saved to {output_dir}")
+
+if __name__ == "__main__":
+    main()
