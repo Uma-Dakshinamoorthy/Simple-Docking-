@@ -1,0 +1,26 @@
+# Requirements for Ligand-Based Pocket Finding and Docking Framework
+
+# Core scientific libraries
+numpy>=1.20.0
+scipy>=1.7.0
+matplotlib>=3.4.0
+
+# Bioinformatics and molecular modeling
+biopython>=1.79
+rdkit>=2022.03.1
+openbabel>=3.1.0  # Optional, install via conda: conda install -c conda-forge openbabel
+
+# Docking backends (optional based on chosen engine)
+# AutoDock Vina: Install from http://vina.scripps.edu/
+# GNINA: Install from https://github.com/gnina/gnina
+# smina: Install from https://sourceforge.net/projects/smina/
+
+# Visualization tools (optional)
+# PyMOL: Install from https://pymol.org
+# NGLView: uncomment if needed
+# nglview>=3.0.0
+
+# Utilities
+tqdm>=4.62.0  # Progress bars
+pandas>=1.3.0  # Data analysis
+scikit-learn>=1.0.0  # For clustering and analysis
