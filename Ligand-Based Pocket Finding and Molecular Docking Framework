@@ -1,6 +1,59 @@
 """
 Ligand-Based Pocket Finding and Molecular Docking Framework"""
 
+What Real Pocket-Finding Algorithms Do
+Actual pocket-finding algorithms like LIGSITE, fpocket, or SiteMap implement sophisticated computational geometry and physics-based methods to identify binding pockets:
+
+Geometric Methods:
+
+LIGSITE scans the protein in multiple directions using 3D grids to identify regions surrounded by protein atoms
+fpocket uses Voronoi tessellation and alpha spheres to identify concave regions on the protein surface
+SURFNET places spheres between pairs of atoms to identify cavities
+
+
+Energy-Based Methods:
+
+SiteMap evaluates both geometric features and energetic properties (hydrophobicity, hydrogen bonding potential)
+FTSite uses probe molecules to identify energetically favorable binding regions
+
+
+Conservation-Based Methods:
+
+Algorithms like ConSurf incorporate evolutionary conservation to identify functionally important pockets
+
+
+Machine Learning Methods:
+
+Modern approaches like DeepSite and P2Rank use neural networks to identify binding sites based on learned features
+
+
+
+What's Missing in the Placeholders
+In the framework I provided:
+
+The calculate_surface() method is just a placeholder that prints a message instead of:
+
+Computing solvent-accessible surface area
+Creating a 3D representation of the protein surface
+Building a grid representation of the protein
+
+
+The identify_cavities() method returns mock data instead of:
+
+Running grid-based cavity detection
+Calculating pocket volumes and shapes
+Filtering pockets based on size, depth, and other properties
+Computing actual pocket centers based on geometric considerations
+
+
+The rank_pockets() method simply sorts by a mock score rather than:
+
+Computing druggability scores based on physicochemical properties
+Evaluating hydrophobicity, polarity, and electrostatic potential
+Comparing to known binding sites for similar proteins
+
+The code for this is as below 
+
 
 import os
 import numpy as np
