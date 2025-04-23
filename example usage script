@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""
+Example usage of the Ligand-Based Pocket Finding and Docking Framework.
+
+This script demonstrates how to use the framework for a typical docking workflow.
+"""
+
+import os
+import argparse
+import logging
+from datetime import datetime
+
+# Import our framework modules
+from ligand_docking_framework import (
+    ProteinPreprocessor, 
+    PocketFinder, 
+    LigandPreparator, 
+    Docking, 
+    ResultAnalyzer
+)
+
+# Import configuration
+from config import config
+
+def setup_logging():
+    """Set up logging configuration."""
+    log_dir = os.path.dirname(config["paths"]["log_file"])
+    if log_dir and not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+        
+    logging.basicConfig(
+        filename=config["paths"]["log_file"],
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Add console handler
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
+    console.setFormatter(formatter)
+    logging.getLogger().addHandler(console)
+    
+    return logging.getLogger()
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Ligand-based pocket finding and docking')
+    
+    parser.add_argument('-p', '--protein', required=True,
+                      help='Protein structure file in PDB format')
+    parser.add_argument('-l', '--ligand', required=True,
+                      help='Ligand file in SDF, MOL, or MOL2 format')
+    parser.add_argument('-o', '--output', default='docking_results',
+                      help='Output directory for results (default: docking_results)')
+    parser.add_argument('--skip-prep', action='store_true',
+                      help='Skip protein preprocessing if already done')
+    parser.add_argument('--use-pocket', type=int, default=0,
+                      help='Use specific pocket by index (0=top ranked)')
+    
+    return parser.parse_args()
+
+def main():
+    """Run the docking workflow."""
+    # Parse arguments
+    args = parse_arguments()
+    
+    # Setup logging
+    logger = setup_logging()
+    logger.info(f"Starting docking workflow at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # Create output directory
+    output_dir = args.output
+    os.makedirs(output_dir, exist_ok=True)
+    logger.info(f"Results will be saved to {output_dir}")
+    
+    # Step 1: Preprocess protein
+    if not args.skip_prep:
+        logger.info("Step 1: Preprocessing protein structure")
+        preprocessor = ProteinPreprocessor(args.protein)
+        protein = preprocessor.load_structure()
+        
+        if config["protein_prep"]["remove_waters"]:
+            logger.info("Removing water molecules")
+            protein = preprocessor.remove_hetero_atoms()
+            
+        if config["protein_prep"]["add_hydrogens"]:
+            logger.info(f"Adding hydrogens at pH {config['protein_prep']['ph']}")
+            protein = preprocessor.add_hydrogens()
+            
+        # Save preprocessed protein
+        preprocessed_file = os.path.join(output_dir, "protein_prepped.pdb")
+        logger.info(f"Saving preprocessed protein to {preprocessed_file}")
+        # In a real implementation, would save the structure here
+    else:
+        logger.info("Skipping protein preprocessing")
+        preprocessed_file = args.protein
+    
+    # Step 2: Find pockets
+    logger.info("Step 2: Finding binding pockets")
+    pocket_finder = PocketFinder(protein if not args.skip_prep else preprocessed_file)
+    
+    surface = pocket_finder.calculate_surface(
+        probe_radius=config["pocket_finder"]["probe_radius"]
+    )
+    
+    pockets = pocket_finder.identify_cavities(
+        min_volume=config["pocket_finder"]["min_volume"]
+    )
+    
+    ranked_pockets = pocket_finder.rank_pockets()
+    max_pockets = min(len(ranked_pockets), config["pocket_finder"]["max_pockets"])
+    
+    logger.info(f"Found {len(ranked_pockets)} potential binding pockets")
+    for i, pocket in enumerate(ranked_pockets[:max_pockets]):
+        logger.info(f"Pocket {i+1}: Center = {pocket['center']}, "
+                   f"Volume = {pocket['volume']}Å³, Score = {pocket['score']}")
+    
+    # Step 3: Prepare ligand
+    logger.info("Step 3: Preparing ligand")
+    ligand_prep = LigandPreparator(args.ligand)
+    ligand = ligand_prep.load_ligand()
+    
+    if config["ligand_prep"]["add_hydrogens"]:
+        logger.info(f"Adding hydrogens to ligand at pH {config['ligand_prep']['ph']}")
+        ligand = ligand_prep.add_hydrogens()
+    
+    if config["ligand_prep"]["gen_conformers"]:
+        logger.info(f"Generating {config['ligand_prep']['num_conformers']} conformers")
+        ligand = ligand_prep.generate_conformers(
+            num_conf=config["ligand_prep"]["num_conformers"]
+        )
+    
+    # Save prepared ligand
+    prepared_ligand = os.path.join(output_dir, "ligand_prepped.sdf")
+    logger.info(f"Saving prepared ligand to {prepared_ligand}")
+    # In a real implementation, would save the ligand here
+    
+    # Step 4: Docking
+    pocket_idx = args.use_pocket
+    if pocket_idx >= len(ranked_pockets):
+        logger.error(f"Pocket index {pocket_idx} is out of range. Maximum index is {len(ranked_pockets)-1}")
+        return
+    
+    target_pocket = ranked_pockets[pocket_idx]
+    logger.info(f"Step 4: Docking ligand to pocket {pocket_idx+1} (center: {target_pocket['center']})")
+    
+    docking = Docking(preprocessed_file, prepared_ligand)
+    
+    # Box size based on pocket with padding
+    padding = config["docking"]["box_padding"]
+    box_size = (20 + padding*2, 20 + padding*2, 20 + padding*2)  # Placeholder
+    
+    docking.prepare_receptor(target_pocket['center'], box_size)
+    results = docking.dock_to_pocket(
+        target_pocket, 
+        exhaustiveness=config["docking"]["exhaustiveness"]
+    )
+    
+    logger.info(f"Generated {len(results)} docking poses")
+    for res in results:
+        logger.info(f"Pose {res['pose']}: Score = {res['score']} kcal/mol")
+    
+    # Save docking poses
+    poses_dir = os.path.join(output_dir, "poses")
+    docking.save_poses(poses_dir)
+    
+    # Step 5: Analyze results
+    logger.info("Step 5: Analyzing results")
+    analyzer = ResultAnalyzer(results, preprocessed_file, prepared_ligand)
+    
+    if config["analysis"]["calculate_interactions"]:
+        logger.info("Calculating protein-ligand interactions")
+        top_pose_file = os.path.join(poses_dir, "pose_1.pdb")  # Placeholder
+        interactions = analyzer.calculate_interactions(top_pose_file)
+        
+        logger.info(f"Interactions in top pose: {interactions}")
+    
+    if config["analysis"]["generate_report"]:
+        report_file = os.path.join(output_dir, "docking_report.txt")
+        logger.info(f"Generating docking report at {report_file}")
+        analyzer.generate_report(report_file)
+    
+    logger.info(f"Docking workflow completed. Results saved to {output_dir}")
+
+if __name__ == "__main__":
+    main()
