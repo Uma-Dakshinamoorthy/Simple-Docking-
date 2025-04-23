@@ -1,0 +1,323 @@
+"""
+Enhanced PocketFinder class with actual pocket detection algorithm implementation.
+This uses a grid-based approach similar to LIGSITE.
+"""
+
+import numpy as np
+from Bio.PDB import PDBParser, Selection
+from scipy import ndimage
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+class PocketFinder:
+    """Identifies potential binding pockets in a protein structure."""
+    
+    def __init__(self, protein_structure):
+        """Initialize with a protein structure."""
+        self.protein = protein_structure
+        self.pockets = []
+        self.grid = None
+        self.protein_atoms = []
+        self.surface = None
+        
+        # Load atoms from structure
+        if isinstance(protein_structure, str):
+            # If provided a PDB file path instead of a structure
+            parser = PDBParser(QUIET=True)
+            self.structure = parser.get_structure('protein', protein_structure)
+            self._load_atoms_from_structure()
+        else:
+            self.structure = protein_structure
+            self._load_atoms_from_structure()
+            
+    def _load_atoms_from_structure(self):
+        """Extract atom coordinates from the protein structure."""
+        self.protein_atoms = []
+        
+        # Extract coordinates from all atoms (excluding hydrogens and hetero atoms)
+        for model in self.structure:
+            for chain in model:
+                for residue in chain:
+                    if residue.id[0] == " ":  # Standard residue
+                        for atom in residue:
+                            if atom.element != "H":  # Skip hydrogens
+                                self.protein_atoms.append(atom.coord)
+                                
+        self.protein_atoms = np.array(self.protein_atoms)
+        
+        # Calculate protein center and dimensions for grid setup
+        self.min_coords = np.min(self.protein_atoms, axis=0)
+        self.max_coords = np.max(self.protein_atoms, axis=0)
+        self.center = (self.min_coords + self.max_coords) / 2
+        self.dimensions = self.max_coords - self.min_coords
+        
+        return self.protein_atoms
+    
+    def calculate_surface(self, probe_radius=1.4, grid_spacing=1.0):
+        """
+        Calculate the protein surface using a 3D grid.
+        
+        Args:
+            probe_radius: Radius of the probe (water) in Angstroms
+            grid_spacing: Resolution of the grid in Angstroms
+            
+        Returns:
+            3D numpy array representing the surface
+        """
+        # Define grid dimensions with padding
+        padding = probe_radius * 3  # Add extra padding around the protein
+        
+        # Calculate grid dimensions
+        x_min, y_min, z_min = self.min_coords - padding
+        x_max, y_max, z_max = self.max_coords + padding
+        
+        # Calculate number of grid points in each dimension
+        nx = int((x_max - x_min) / grid_spacing) + 1
+        ny = int((y_max - y_min) / grid_spacing) + 1
+        nz = int((z_max - z_min) / grid_spacing) + 1
+        
+        # Create empty grid (0 = empty space, 1 = protein)
+        self.grid = np.zeros((nx, ny, nz), dtype=np.int8)
+        self.grid_origin = np.array([x_min, y_min, z_min])
+        self.grid_spacing = grid_spacing
+        
+        # Populate grid with protein atoms (van der Waals radii)
+        # Standard VdW radii (simplified)
+        vdw_radii = {
+            'C': 1.7,
+            'N': 1.55,
+            'O': 1.52,
+            'S': 1.8,
+            'P': 1.8,
+            'default': 1.7
+        }
+        
+        # Fill grid points within VdW radius of each atom
+        for model in self.structure:
+            for chain in model:
+                for residue in chain:
+                    if residue.id[0] == " ":  # Standard residue
+                        for atom in residue:
+                            if atom.element != "H":  # Skip hydrogens
+                                # Get atom position
+                                x, y, z = atom.coord
+                                
+                                # Get atom radius
+                                radius = vdw_radii.get(atom.element, vdw_radii['default'])
+                                
+                                # Convert to grid coordinates
+                                gx = int((x - x_min) / grid_spacing)
+                                gy = int((y - y_min) / grid_spacing)
+                                gz = int((z - z_min) / grid_spacing)
+                                
+                                # Determine grid points within the atom's radius
+                                radius_grid = int(radius / grid_spacing) + 1
+                                
+                                # Create a sphere mask
+                                for dx in range(-radius_grid, radius_grid + 1):
+                                    for dy in range(-radius_grid, radius_grid + 1):
+                                        for dz in range(-radius_grid, radius_grid + 1):
+                                            if dx**2 + dy**2 + dz**2 <= (radius_grid)**2:
+                                                gx_idx = gx + dx
+                                                gy_idx = gy + dy
+                                                gz_idx = gz + dz
+                                                
+                                                # Check if within grid bounds
+                                                if (0 <= gx_idx < nx and 
+                                                    0 <= gy_idx < ny and 
+                                                    0 <= gz_idx < nz):
+                                                    self.grid[gx_idx, gy_idx, gz_idx] = 1
+        
+        # Calculate surface by dilating and subtracting
+        # Dilate the protein by the probe radius
+        struct_element = ndimage.generate_binary_structure(3, 1)
+        dilated = ndimage.binary_dilation(
+            self.grid, 
+            structure=struct_element,
+            iterations=int(probe_radius / grid_spacing)
+        )
+        
+        # Surface is the difference between dilated and original
+        self.surface = np.logical_and(dilated, np.logical_not(self.grid))
+        
+        print(f"Calculated protein surface with probe radius {probe_radius}Å")
+        print(f"Grid dimensions: {nx} x {ny} x {nz} points")
+        
+        return self.surface
+    
+    def identify_cavities(self, min_volume=100):
+        """
+        Identify cavities in the protein surface.
+        
+        Args:
+            min_volume: Minimum volume of a cavity in cubic Angstroms
+            
+        Returns:
+            List of dictionaries with pocket information
+        """
+        if self.surface is None:
+            print("Surface not calculated yet. Running with default parameters.")
+            self.calculate_surface()
+        
+        # Create a complementary grid (1 = empty space, 0 = protein)
+        complement = np.logical_not(self.grid).astype(np.int8)
+        
+        # Find all cavities (connected components)
+        labeled, num_features = ndimage.label(complement)
+        
+        # Get cavity sizes
+        cavity_sizes = ndimage.sum(complement, labeled, range(1, num_features + 1))
+        
+        # Convert to volumes
+        volume_per_voxel = self.grid_spacing**3
+        cavity_volumes = cavity_sizes * volume_per_voxel
+        
+        # Filter by size
+        large_cavity_indices = np.where(cavity_volumes > min_volume)[0] + 1  # +1 because labels start at 1
+        
+        # The largest feature is typically the exterior (outside the protein)
+        largest_cavity_idx = np.argmax(cavity_volumes) + 1
+        
+        # Create a mask for potential binding pockets (excluding the exterior)
+        pocket_indices = [idx for idx in large_cavity_indices if idx != largest_cavity_idx]
+        
+        # Compile pocket information
+        self.pockets = []
+        for i, pocket_idx in enumerate(pocket_indices):
+            # Create a mask for this pocket
+            pocket_mask = (labeled == pocket_idx)
+            
+            # Calculate pocket center
+            pocket_coords = np.argwhere(pocket_mask)
+            center_grid = np.mean(pocket_coords, axis=0)
+            
+            # Convert center to real coordinates
+            center_real = self.grid_origin + center_grid * self.grid_spacing
+            
+            # Calculate pocket volume
+            volume = np.sum(pocket_mask) * volume_per_voxel
+            
+            # Calculate a simple druggability score based on pocket volume
+            # (in a real implementation, you would use physicochemical properties)
+            score = min(1.0, volume / 1000)  # Simple score, max 1.0
+            
+            # Store pocket information
+            self.pockets.append({
+                'center': tuple(center_real),
+                'volume': volume,
+                'score': score,
+                'mask': pocket_mask
+            })
+        
+        print(f"Identified {len(self.pockets)} cavities with minimum volume of {min_volume}Å³")
+        
+        return self.pockets
+    
+    def rank_pockets(self, by='score'):
+        """
+        Rank identified pockets by various criteria.
+        
+        Args:
+            by: Criteria to rank by ('score', 'volume')
+            
+        Returns:
+            Sorted list of pockets
+        """
+        if not self.pockets:
+            print("No pockets identified yet.")
+            return []
+            
+        # Sort pockets by the specified criteria
+        if by == 'score':
+            self.pockets.sort(key=lambda x: x['score'], reverse=True)
+        elif by == 'volume':
+            self.pockets.sort(key=lambda x: x['volume'], reverse=True)
+        else:
+            print(f"Unknown ranking criteria: {by}. Using score.")
+            self.pockets.sort(key=lambda x: x['score'], reverse=True)
+            
+        return self.pockets
+    
+    def visualize_pockets(self, max_pockets=3):
+        """
+        Visualize the top N pockets.
+        
+        Args:
+            max_pockets: Maximum number of pockets to visualize
+        """
+        if not self.pockets:
+            print("No pockets to visualize.")
+            return
+            
+        # Ensure pockets are ranked
+        if 'score' not in self.pockets[0]:
+            self.rank_pockets()
+            
+        # Set up 3D plot
+        fig = plt.figure(figsize=(12, 10))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # Plot protein surface points (down-sampled for visualization)
+        surface_points = np.argwhere(self.surface)[::50]  # Take every 50th point for clearer visualization
+        if len(surface_points) > 0:
+            surface_coords = self.grid_origin + surface_points * self.grid_spacing
+            ax.scatter(surface_coords[:, 0], surface_coords[:, 1], surface_coords[:, 2], 
+                       color='gray', alpha=0.2, s=1, label='Protein Surface')
+        
+        # Plot pocket centers and volumes
+        colors = ['red', 'blue', 'green', 'purple', 'orange']
+        for i, pocket in enumerate(self.pockets[:max_pockets]):
+            center = pocket['center']
+            volume = pocket['volume']
+            score = pocket['score']
+            
+            # Plot pocket center
+            ax.scatter([center[0]], [center[1]], [center[2]], 
+                       color=colors[i % len(colors)], s=100, 
+                       label=f'Pocket {i+1}: Vol={volume:.1f}Å³, Score={score:.2f}')
+            
+            # Plot some pocket points
+            pocket_mask = pocket['mask']
+            pocket_points = np.argwhere(pocket_mask)[::10]  # Down-sample for visualization
+            if len(pocket_points) > 0:
+                pocket_coords = self.grid_origin + pocket_points * self.grid_spacing
+                ax.scatter(pocket_coords[:, 0], pocket_coords[:, 1], pocket_coords[:, 2], 
+                           color=colors[i % len(colors)], alpha=0.5, s=5)
+        
+        ax.set_xlabel('X (Å)')
+        ax.set_ylabel('Y (Å)')
+        ax.set_zlabel('Z (Å)')
+        ax.set_title('Protein Surface and Binding Pockets')
+        ax.legend()
+        
+        plt.tight_layout()
+        plt.show()
+        
+        return fig, ax
+    
+    def export_pocket_centers(self, filename="pocket_centers.pdb"):
+        """
+        Export pocket centers as a PDB file for visualization in PyMOL.
+        
+        Args:
+            filename: Output PDB filename
+        """
+        if not self.pockets:
+            print("No pockets to export.")
+            return
+            
+        with open(filename, 'w') as f:
+            f.write("HEADER    BINDING POCKET CENTERS\n")
+            for i, pocket in enumerate(self.pockets):
+                center = pocket['center']
+                volume = pocket['volume']
+                score = pocket['score']
+                
+                # Use HETATM records for pocket centers
+                f.write(f"HETATM{i+1:5d} POC  POK {i+1:4d}    "
+                        f"{center[0]:8.3f}{center[1]:8.3f}{center[2]:8.3f}"
+                        f"{1.00:6.2f}{score:6.2f}          C\n")
+                
+            f.write("END\n")
+            
+        print(f"Exported {len(self.pockets)} pocket centers to {filename}")
